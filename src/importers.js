@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import childProcess from 'node:child_process';
 import zlib from 'node:zlib';
+import path from 'node:path';
 
 function decodeXml(value) {
   return value.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
@@ -62,21 +63,32 @@ function localOcr(filePath) {
   }
 }
 
-export function parseImportContent({ type, buffer, filePath, providedText = '' }) {
-  if (providedText.trim()) return { text: providedText.trim(), source: 'provided-text', message: '' };
-  if (type === 'txt') return { text: buffer.toString('utf8').trim(), source: 'text', message: '' };
-  if (type === 'docx') {
-    const text = docxText(buffer);
-    return { text, source: 'docx-parser', message: text ? '' : 'DOCX 未提取到可识别文本，可能只包含图片' };
-  }
-  if (type === 'pdf') {
-    let text = '';
-    try { text = childProcess.execFileSync(process.platform === 'win32' ? 'pdftotext.exe' : 'pdftotext', ['-layout', filePath, '-'], { encoding: 'utf8', timeout: 120000, maxBuffer: 32 * 1024 * 1024 }); } catch { text = pdfText(buffer); }
-    return { text: text.trim(), source: 'pdf-text', message: text.trim() ? '' : 'PDF 未提取到文本，请安装本地 OCR 或配置扫描 PDF 处理器' };
-  }
-  if (['png', 'jpg', 'jpeg'].includes(type)) {
-    const text = localOcr(filePath);
-    return { text, source: 'tesseract', message: text ? '' : '未检测到可用的本地 Tesseract OCR，原文件已保存，任务等待 OCR 适配器处理' };
-  }
-  return { text: '', source: 'unsupported', message: '当前格式没有本地解析器' };
+function pythonPdfText(filePath) {
+  const script = "import sys; from PyPDF2 import PdfReader; print('\\f'.join((page.extract_text() or '') for page in PdfReader(sys.argv[1]).pages))";
+  try { return childProcess.execFileSync('python', ['-X', 'utf8', '-c', script, filePath], { encoding: 'utf8', timeout: 120000, maxBuffer: 32 * 1024 * 1024 }).trim(); } catch { return ''; }
+}
+
+function pdfTextFallback(buffer) {
+  const source = buffer.toString('latin1');
+  return [...source.matchAll(/\((?:\\.|[^)])*\)\s*Tj/g)].map(([value]) => value.slice(1, value.lastIndexOf(')')).replace(/\\([\\()])/g, '$1')).join('\n').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '').trim();
+}
+
+function renderPdfPages(filePath, outputDir) {
+  fs.mkdirSync(outputDir, { recursive: true });
+  try { childProcess.execFileSync(process.platform === 'win32' ? 'pdftoppm.exe' : 'pdftoppm', ['-png', '-r', '144', filePath, path.join(outputDir, 'page')], { timeout: 120000, maxBuffer: 1024 * 1024 }); } catch { return []; }
+  return fs.readdirSync(outputDir).filter((name) => /^page-\d+\.png$/.test(name)).sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0])).map((name) => path.join(outputDir, name));
+}
+
+function splitPages(text) { return String(text || '').split(/\f/).map((page) => page.trim()).filter(Boolean); }
+
+export function parseImportContent({ type, buffer, filePath, pageOutputDir, providedText = '' }) {
+  let text = providedText.trim(); let source = 'provided-text'; let message = ''; let pageImages = [];
+  if (!text && type === 'txt') { text = buffer.toString('utf8').trim(); source = 'text'; }
+  if (!text && type === 'docx') { text = docxText(buffer); source = 'docx-parser'; if (!text) message = 'DOCX 未提取到可识别文本，可能只包含图片'; }
+  if (!text && type === 'pdf') { text = pythonPdfText(filePath) || pdfTextFallback(buffer); source = text ? 'pdf-local-text' : 'pdf-render'; if (!text) message = 'PDF 未提取到文本，已渲染页面；请安装本地 OCR 适配器处理扫描内容'; }
+  if (type === 'pdf' && pageOutputDir) pageImages = renderPdfPages(filePath, pageOutputDir);
+  if (!text && ['png', 'jpg', 'jpeg'].includes(type)) { text = localOcr(filePath); source = 'tesseract'; if (!text) message = '未检测到可用的本地 Tesseract OCR，原文件已保存，任务等待 OCR 适配器处理'; }
+  const pages = splitPages(text).map((pageText, index) => ({ pageNo: index + 1, text: pageText, imagePath: pageImages[index] || '' }));
+  if (!pages.length && pageImages.length) pageImages.forEach((imagePath, index) => pages.push({ pageNo: index + 1, text: '', imagePath }));
+  return { text, pages, pageImages, source, message };
 }

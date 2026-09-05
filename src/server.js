@@ -37,7 +37,9 @@ function body(request) {
 }
 function contentFromCandidate(candidate) {
   const content = json(candidate.content_json, { stem: '', options: [], attachments: [] });
-  const answers = json(candidate.answer_json || '[]', []);
+  const answers = json(candidate.answer_json || content.answer || '[]', []);
+  if (candidate.analysis) content.analysis = candidate.analysis;
+  if (candidate.attachments_json) content.attachments = json(candidate.attachments_json, content.attachments || []);
   return { content, answers };
 }
 function inferType(content) {
@@ -72,29 +74,61 @@ function indexQuestion(questionId) {
   db.prepare('DELETE FROM question_search WHERE question_id = ?').run(String(questionId));
   db.prepare('INSERT INTO question_search(question_id, stem, options, analysis, tags) VALUES (?, ?, ?, ?, ?)').run(String(questionId), content.stem || '', (content.options || []).map((option) => option.text).join(' '), row.analysis || '', (content.tags || []).join(' '));
 }
-function parseTextCandidates(text) {
-  const lines = String(text || '').replace(/\r/g, '').split('\n');
+function normalizeImportText(text) {
+  return String(text || '').replace(/\r/g, '').replace(/[Ａ-Ｚａ-ｚ０-９]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0))
+    .split('\n').filter((line) => !/^\s*第\s*\d+\s*页\/共\s*\d+\s*页\s*$/.test(line) && !/学科网（北京）股份有限公司/.test(line)).join('\n');
+}
+function answerValue(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return [];
+  if (/^[A-H]+$/i.test(normalized)) return [...normalized.toUpperCase()];
+  if (/^(正确|对)$/i.test(normalized)) return ['true'];
+  if (/^(错误|错)$/i.test(normalized)) return ['false'];
+  return [normalized];
+}
+function parseTextCandidates(text, pageNo = 1, attachmentPath = '', pageRanges = []) {
+  const normalized = normalizeImportText(text);
+  const lines = normalized.split('\n');
   const starts = [];
-  lines.forEach((line, index) => { if (/^\s*\d{1,3}[.、．)）]\s*/.test(line)) starts.push(index); });
-  if (!starts.length && text.trim()) return [{ stem: text.trim(), options: [], attachments: [] }];
+  lines.forEach((line, index) => { if (/^\s*\d{1,3}\s*[.、．)）]\s*/.test(line)) starts.push(index); });
+  const pageForLine = (lineIndex) => pageRanges.find((range) => lineIndex >= range.start && lineIndex < range.end)?.pageNo || pageNo;
+  const attachmentsForRange = (start, end) => {
+    if (!pageRanges.length) return attachmentPath ? [{ type: 'page_image', path: attachmentPath, pageNo }] : [];
+    return pageRanges.filter((range) => range.start < end && range.end > start && range.imagePath).map((range) => ({ type: 'page_image', path: range.imagePath, pageNo: range.pageNo }));
+  };
+  if (!starts.length && normalized.trim()) return [{ stem: normalized.trim(), options: [], answer: [], analysis: '', attachments: attachmentsForRange(0, lines.length), pageStart: pageNo, pageEnd: pageNo }];
   return starts.map((start, position) => {
     const end = starts[position + 1] ?? lines.length;
-    const segment = lines.slice(start, end).filter(Boolean);
+    const segment = lines.slice(start, end).filter((line) => line.trim());
     const first = segment.shift() || '';
-    const stem = first.replace(/^\s*\d{1,3}[.、．)）]\s*/, '').trim();
+    const number = first.match(/^\s*(\d{1,3})\s*[.、．)）]\s*/)?.[1] || '';
+    const raw = [first.replace(/^\s*\d{1,3}\s*[.、．)）]\s*/, ''), ...segment].join('\n');
+    const marker = raw.search(/【(?:答案|解析|详解)】/);
+    const questionPart = marker >= 0 ? raw.slice(0, marker) : raw;
+    const tail = marker >= 0 ? raw.slice(marker) : '';
+    const answerMatch = tail.match(/【答案】\s*([\s\S]*?)(?=【(?:解析|详解)】|$)/i);
+    const answer = answerValue(answerMatch?.[1]);
+    const analysisStart = tail.search(/【(?:解析|详解)】/);
+    const analysis = analysisStart >= 0 ? tail.slice(analysisStart).replace(/【(?:解析|详解)】/g, '').trim() : '';
     const options = [];
-    const stemLines = [];
-    for (const line of segment) {
-      const option = line.match(/^\s*([A-HＡ-Ｈ])[.、．)）]\s*(.*)$/);
-      if (option) options.push({ key: option[1].toUpperCase(), text: option[2].trim() });
-      else stemLines.push(line.trim());
-    }
-    return { stem: [stem, ...stemLines].filter(Boolean).join('\n'), options, attachments: [] };
-  });
+    const optionMatches = [...questionPart.matchAll(/(?:^|[\s])([A-H])\s*[.、．)）:：]\s*/g)];
+    const stemText = optionMatches.length ? questionPart.slice(0, optionMatches[0].index).trim() : questionPart.trim();
+    optionMatches.forEach((match, index) => {
+      const startIndex = match.index + match[0].length;
+      const endIndex = optionMatches[index + 1]?.index ?? questionPart.length;
+      const optionText = questionPart.slice(startIndex, endIndex).replace(/\s+/g, ' ').trim();
+      if (optionText) options.push({ key: match[1], text: optionText });
+    });
+    const content = { number, stem: stemText, options, attachments: attachmentsForRange(start, end) };
+    if (answer.length) content.type = options.length ? (answer.length > 1 ? 'multiple_choice' : 'single_choice') : (answer[0] === 'true' || answer[0] === 'false' ? 'true_false' : 'short_answer');
+    if (!content.stem) return null;
+    if (!options.length && !answer.length && !analysis && /(试卷分为|注意事项|答题卡|考试结束|答题前务必|作图要用)/.test(content.stem)) return null;
+    return { content, answer, analysis, pageStart: pageForLine(start), pageEnd: pageForLine(Math.max(start, end - 1)) };
+  }).filter(Boolean);
 }
 function candidateView(row) {
   const content = json(row.content_json, {});
-  return { ...row, content, autoContent: json(row.auto_content_json, {}), knowledgePointIds: db.prepare('SELECT knowledge_point_id AS id, confirmed FROM candidate_knowledge_points WHERE candidate_id = ?').all(row.id) };
+  return { ...row, content, answer: json(row.answer_json, []), analysis: row.analysis || content.analysis || '', attachments: json(row.attachments_json, content.attachments || []), selection: json(row.manual_selection_json, {}), autoContent: json(row.auto_content_json, {}), knowledgePointIds: db.prepare('SELECT knowledge_point_id AS id, confirmed FROM candidate_knowledge_points WHERE candidate_id = ?').all(row.id) };
 }
 function questionView(row) {
   const content = json(row.content_json, {});
@@ -192,21 +226,41 @@ async function api(request, response, url) {
     const bank = db.prepare('SELECT id FROM question_banks WHERE id = ?').get(Number(input.bankId || 1));
     if (!bank) return fail(response, 400, '目标题库不存在');
     const hash = hashBuffer(content);
-    const parsed = parseImportContent({ type, buffer: content, filePath, providedText: String(input.text || '') });
-    const candidates = parseTextCandidates(parsed.text);
+    const pageOutputDir = path.join(paths.imports, jobId, 'pages');
+    const parsed = parseImportContent({ type, buffer: content, filePath, pageOutputDir, providedText: String(input.text || '') });
+    if (['png', 'jpg', 'jpeg'].includes(type)) { fs.mkdirSync(pageOutputDir, { recursive: true }); const imagePath = path.join(pageOutputDir, `page-1.${type === 'jpeg' ? 'jpg' : type}`); fs.copyFileSync(filePath, imagePath); parsed.pages = [{ pageNo: 1, text: parsed.text, imagePath }]; }
+    const pageRanges = [];
+    const combinedLines = [];
+    parsed.pages.forEach((page) => {
+      const pageLines = normalizeImportText(page.text).split('\n');
+      const start = combinedLines.length;
+      combinedLines.push(...pageLines, '');
+      pageRanges.push({ pageNo: page.pageNo, start, end: combinedLines.length, imagePath: page.imagePath ? `/api/imports/${jobId}/pages/${page.pageNo}/image` : '' });
+    });
+    const candidates = parseTextCandidates(combinedLines.join('\n'), 1, '', pageRanges);
     transaction(() => {
       db.prepare('INSERT INTO import_jobs(id, bank_id, file_name, file_type, file_path, source_hash, status, progress, error_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(jobId, Number(input.bankId || 1), fileName, type, filePath, hash, candidates.length ? 'waiting_review' : 'uploaded', candidates.length ? 70 : 10, parsed.message);
-      db.prepare('INSERT INTO import_pages(job_id, page_no, ocr_text, status) VALUES (?, ?, ?, ?)').run(jobId, 1, parsed.text, candidates.length ? 'completed' : 'pending');
+      const pages = parsed.pages.length ? parsed.pages : [{ pageNo: 1, text: parsed.text, imagePath: '' }];
+      pages.forEach((page) => db.prepare('INSERT INTO import_pages(job_id, page_no, image_path, ocr_text, status) VALUES (?, ?, ?, ?, ?)').run(jobId, page.pageNo, page.imagePath, page.text, page.text || page.imagePath ? 'completed' : 'pending'));
       candidates.forEach((content) => {
         const candidateId = id();
         db.prepare(`INSERT INTO import_candidates(id, job_id, page_start, page_end, content_json, auto_content_json, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-          .run(candidateId, jobId, 1, 1, JSON.stringify(content), JSON.stringify(content), input.text ? 0.82 : 0.1);
-        for (const point of classifyKnowledgePoints(content, bank.id)) db.prepare('INSERT INTO candidate_knowledge_points(candidate_id, knowledge_point_id, source, confidence) VALUES (?, ?, ?, ?)').run(candidateId, point.id, 'rule', point.confidence);
+          .run(candidateId, jobId, content.pageStart, content.pageEnd, JSON.stringify(content.content), JSON.stringify(content.content), input.text ? 0.82 : (parsed.source === 'pdf-local-text' || parsed.source === 'docx-parser' ? 0.8 : 0.1));
+        db.prepare('UPDATE import_candidates SET answer_json = ?, analysis = ?, attachments_json = ? WHERE id = ?').run(JSON.stringify(content.answer), content.analysis, JSON.stringify(content.content.attachments || []), candidateId);
+        for (const point of classifyKnowledgePoints(content.content, bank.id)) db.prepare('INSERT INTO candidate_knowledge_points(candidate_id, knowledge_point_id, source, confidence) VALUES (?, ?, ?, ?)').run(candidateId, point.id, 'rule', point.confidence);
       });
     });
     return send(response, 201, { id: jobId, status: candidates.length ? 'waiting_review' : 'uploaded', candidateCount: candidates.length, parser: parsed.source, message: candidates.length ? '已生成候选，请人工校对' : parsed.message || '文件已保存，等待本地解析/OCR适配器处理' });
   }
   const importMatch = pathname.match(/^\/api\/imports\/([^/]+)$/);
+  const pageImageMatch = pathname.match(/^\/api\/imports\/([^/]+)\/pages\/(\d+)\/image$/);
+  if (method === 'GET' && pageImageMatch) {
+    const page = db.prepare('SELECT image_path FROM import_pages WHERE job_id = ? AND page_no = ?').get(pageImageMatch[1], pageImageMatch[2]);
+    if (!page || !page.image_path || !fs.existsSync(page.image_path)) return fail(response, 404, '页面图片不存在');
+    const contentTypes = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg' };
+    response.writeHead(200, { 'Content-Type': contentTypes[path.extname(page.image_path).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'private, max-age=3600' });
+    return fs.createReadStream(page.image_path).pipe(response);
+  }
   if (method === 'GET' && importMatch) {
     const job = db.prepare('SELECT * FROM import_jobs WHERE id = ?').get(importMatch[1]);
     if (!job) return fail(response, 404, '导入任务不存在');
@@ -218,11 +272,15 @@ async function api(request, response, url) {
   if (method === 'PUT' && candidateMatch && !candidateMatch[3]) {
     const input = await body(request); const candidate = db.prepare('SELECT * FROM import_candidates WHERE id = ? AND job_id = ?').get(candidateMatch[2], candidateMatch[1]);
     if (!candidate) return fail(response, 404, '候选题不存在');
-    const content = input.content || json(candidate.content_json, {});
+    const existingContent = json(candidate.content_json, {});
+    const content = input.content ? { ...existingContent, ...input.content } : existingContent;
     const type = normalizeType(input.type || content.type, content);
     validateContent(content, type);
     content.type = type;
-    db.prepare('UPDATE import_candidates SET content_json = ?, status = \'pending_review\', updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(JSON.stringify(content), candidate.id);
+    const answers = Array.isArray(input.answer) ? input.answer : json(candidate.answer_json, content.answer || []);
+    const analysis = typeof input.analysis === 'string' ? input.analysis : (content.analysis || candidate.analysis || '');
+    content.analysis = analysis;
+    db.prepare('UPDATE import_candidates SET content_json = ?, answer_json = ?, analysis = ?, attachments_json = ?, status = \'pending_review\', updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(JSON.stringify(content), JSON.stringify(answers), analysis, JSON.stringify(content.attachments || []), candidate.id);
     if (Array.isArray(input.knowledgePointIds)) {
       transaction(() => { db.prepare('DELETE FROM candidate_knowledge_points WHERE candidate_id = ?').run(candidate.id); for (const pointId of input.knowledgePointIds) db.prepare('INSERT INTO candidate_knowledge_points(candidate_id, knowledge_point_id, source, confirmed) VALUES (?, ?, ?, 1)').run(candidate.id, pointId, 'manual'); });
     }
@@ -230,7 +288,11 @@ async function api(request, response, url) {
   }
   if (method === 'POST' && candidateMatch?.[3] === 'crop') {
     const input = await body(request); const candidateId = candidateMatch[2];
-    db.prepare('UPDATE import_candidates SET manual_selection_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND job_id = ?').run(JSON.stringify(input.selection || {}), candidateId, candidateMatch[1]);
+    const candidate = db.prepare('SELECT id FROM import_candidates WHERE id = ? AND job_id = ?').get(candidateId, candidateMatch[1]);
+    if (!candidate) return fail(response, 404, '候选题不存在');
+    const selection = input.selection || {};
+    if (selection.unit === 'relative' && ['x', 'y', 'width', 'height'].some((key) => !Number.isFinite(Number(selection[key])) || Number(selection[key]) < 0 || Number(selection[key]) > 1)) return fail(response, 400, '选区坐标必须是 0 到 1 之间的数字');
+    db.prepare('UPDATE import_candidates SET manual_selection_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND job_id = ?').run(JSON.stringify(selection), candidateId, candidateMatch[1]);
     return send(response, 200, { candidateId, message: '手动选区已保存，下一步可重新执行本地 OCR' });
   }
   const confirmMatch = pathname.match(/^\/api\/imports\/([^/]+)\/confirm$/);
@@ -242,10 +304,10 @@ async function api(request, response, url) {
       const { content, answers } = contentFromCandidate(candidate); const type = normalizeType(content.type, content); validateContent(content, type);
       const question = db.prepare('INSERT INTO questions(bank_id, type, status, difficulty, source_job_id) VALUES (?, ?, ?, ?, ?)').run(job.bank_id, type, 'draft', inputDifficulty(content), jobId);
       const questionId = Number(question.lastInsertRowid);
-      const version = db.prepare('INSERT INTO question_versions(question_id, version_no, content_json, answer_json) VALUES (?, ?, ?, ?)').run(questionId, 1, JSON.stringify(content), JSON.stringify(answers));
+      const version = db.prepare('INSERT INTO question_versions(question_id, version_no, content_json, answer_json, analysis) VALUES (?, ?, ?, ?, ?)').run(questionId, 1, JSON.stringify(content), JSON.stringify(answers), content.analysis || '');
       db.prepare('UPDATE questions SET current_version_id = ? WHERE id = ?').run(Number(version.lastInsertRowid), questionId);
       indexQuestion(questionId);
-      db.prepare('INSERT INTO question_sources(question_id, import_job_id, page_no, crop_path, source_hash, source_text) VALUES (?, ?, ?, ?, ?, ?)').run(questionId, jobId, candidate.page_start, candidate.crop_path, job.source_hash, JSON.stringify(content));
+      db.prepare('INSERT INTO question_sources(question_id, import_job_id, page_no, crop_path, source_hash, source_text) VALUES (?, ?, ?, ?, ?, ?)').run(questionId, jobId, candidate.page_start, candidate.manual_selection_json || candidate.crop_path || '', job.source_hash, JSON.stringify(content));
       db.prepare('INSERT INTO question_knowledge_points(question_id, knowledge_point_id, source) SELECT ?, knowledge_point_id, CASE WHEN confirmed = 1 THEN \'manual\' ELSE \'rule\' END FROM candidate_knowledge_points WHERE candidate_id = ?').run(questionId, candidate.id);
       db.prepare('UPDATE import_candidates SET status = \'confirmed\' WHERE id = ?').run(candidate.id);
       return questionId;

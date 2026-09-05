@@ -20,12 +20,22 @@ for (const directory of Object.values(paths).filter((value) => value !== paths.d
 
 export const db = new DatabaseSync(paths.database);
 db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)');
 
-const migrationPath = path.join(projectRoot, 'migrations', '001_initial.sql');
-db.exec(fs.readFileSync(migrationPath, 'utf8'));
-const migration = db.prepare('SELECT version FROM schema_migrations WHERE version = ?').get('001_initial');
-if (!migration) {
-  db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, CURRENT_TIMESTAMP)').run('001_initial');
+const migrations = [
+  ['001_initial', path.join(projectRoot, 'migrations', '001_initial.sql')],
+  ['002_import_structure', path.join(projectRoot, 'migrations', '002_import_structure.sql')]
+];
+for (const [version, migrationPath] of migrations) {
+  if (!db.prepare('SELECT version FROM schema_migrations WHERE version = ?').get(version)) {
+    transactionMigration(migrationPath);
+    db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, CURRENT_TIMESTAMP)').run(version);
+  }
+}
+
+function transactionMigration(migrationPath) {
+  db.exec('BEGIN IMMEDIATE');
+  try { db.exec(fs.readFileSync(migrationPath, 'utf8')); db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; }
 }
 
 function seed() {
