@@ -1,0 +1,62 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { once } from 'node:events';
+import { spawn } from 'node:child_process';
+import test from 'node:test';
+
+const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tiku-test-'));
+const port = 3100 + Math.floor(Math.random() * 500);
+const server = spawn(process.execPath, ['src/server.js'], { cwd: path.resolve(import.meta.dirname, '..'), env: { ...process.env, PORT: String(port), TIKU_DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'] });
+
+async function waitForHealth() {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try { const response = await fetch(`http://127.0.0.1:${port}/api/health`); if (response.ok) return; } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('测试服务启动超时');
+}
+async function request(pathname, options) {
+  const response = await fetch(`http://127.0.0.1:${port}${pathname}`, { headers: { 'Content-Type': 'application/json' }, ...options });
+  const payload = response.headers.get('content-type')?.includes('application/json') ? await response.json() : await response.arrayBuffer();
+  assert.equal(response.ok, true, JSON.stringify(payload));
+  return payload.data ?? payload;
+}
+
+test.before(async () => waitForHealth());
+test.after(async () => {
+  server.kill();
+  await once(server, 'close').catch(() => {});
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
+test('本地题库主流程可运行', async () => {
+  const banks = await request('/api/question-banks');
+  assert.ok(banks.length > 0);
+  const points = await request('/api/knowledge-points');
+  const text = '1. 集合的概念题目？\nA. 选项一\nB. 选项二\n\n2. 第二道判断题。';
+  const imported = await request('/api/imports/papers', { method: 'POST', body: JSON.stringify({ bankId: banks[0].id, fileName: 'sample.txt', fileType: 'txt', text }) });
+  assert.equal(imported.candidateCount, 2);
+  const job = await request(`/api/imports/${imported.id}`);
+  assert.equal(job.candidates.length, 2);
+  assert.ok(job.candidates[0].knowledgePointIds.length > 0);
+  const candidate = job.candidates[0];
+  await request(`/api/imports/${imported.id}/candidates/${candidate.id}`, { method: 'PUT', body: JSON.stringify({ type: 'single_choice', content: { type: 'single_choice', stem: '集合的概念校对题？', options: [{ key: 'A', text: '选项一' }, { key: 'B', text: '选项二' }], tags: ['本地测试'], attachments: [] }, knowledgePointIds: [points[0].id] }) });
+  const confirmation = await request(`/api/imports/${imported.id}/confirm`, { method: 'POST', body: '{}' });
+  assert.equal(confirmation.count, 2);
+  for (const questionId of confirmation.importedQuestionIds) await request(`/api/questions/${questionId}/publish`, { method: 'POST', body: '{}' });
+  const search = await request(`/api/questions/search?bankId=${banks[0].id}&keyword=${encodeURIComponent('集合的概念校对题')}`);
+  assert.ok(search.items.some((item) => item.content.stem.includes('集合的概念校对题')));
+  assert.equal('answer_json' in search.items[0], false);
+
+  const paper = await request('/api/papers/generate', { method: 'POST', body: JSON.stringify({ name: '自动测试卷', rule: { bankId: banks[0].id, typeCounts: { single_choice: 1 }, scores: { single_choice: 10 } } }) });
+  assert.equal(paper.selectedCount, 1);
+  const preview = await request(`/api/papers/${paper.id}`);
+  assert.equal(preview.questions.length, 1);
+  await request(`/api/papers/${paper.id}/confirm`, { method: 'POST', body: '{}' });
+  const exported = await request(`/api/papers/${paper.id}/export-pdf`, { method: 'POST', body: '{}' });
+  assert.ok(exported.downloadUrl);
+  const pdf = await request(exported.downloadUrl);
+  assert.equal(Buffer.from(pdf).subarray(0, 5).toString(), '%PDF-');
+});

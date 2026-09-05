@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tiku 题库工作台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand"><span class="brand-mark">题</span><div><strong>TIKU</strong><small>本地题库工作台</small></div></div>
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item active" data-view="overview"><span>⌂</span>总览</button>
+          <button class="nav-item" data-view="import"><span>↥</span>试卷导入</button>
+          <button class="nav-item" data-view="search"><span>⌕</span>试题检索</button>
+          <button class="nav-item" data-view="paper"><span>▤</span>组卷中心</button>
+        </nav>
+        <div class="sidebar-note"><span class="status-dot"></span><div><strong>本地模式</strong><small>数据不会离开当前设备</small></div></div>
+      </aside>
+      <main class="main-content">
+        <header class="topbar"><div><p class="eyebrow">QUESTION BANK / LOCAL</p><h1 id="page-title">题库总览</h1></div><div class="health"><span class="status-dot"></span><span id="health-text">正在检查本地服务</span></div></header>
+        <section id="view-overview" class="view active"></section>
+        <section id="view-import" class="view"></section>
+        <section id="view-search" class="view"></section>
+        <section id="view-paper" class="view"></section>
+      </main>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
