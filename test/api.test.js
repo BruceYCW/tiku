@@ -87,6 +87,8 @@ test('本地题库主流程可运行', async () => {
   await request(`/api/questions/${manualConfirmation.importedQuestionIds[0]}/publish`, { method: 'POST', body: '{}' });
   const publishedManual = await request(`/api/questions/search?bankId=${banks[0].id}&keyword=${encodeURIComponent('跨页测试题')}`);
   assert.equal(publishedManual.total, 1);
+  const chineseKeyword = await request(`/api/questions/search?bankId=${banks[0].id}&keyword=${encodeURIComponent('集合')}`);
+  assert.ok(chineseKeyword.items.some((item) => item.content.stem.includes('集合')));
   const cleared = await request(`/api/imports/${manual.id}/segments/clear`, { method: 'POST', body: '{}' });
   assert.equal(cleared.cleared, true);
 });

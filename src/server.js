@@ -161,6 +161,17 @@ function listQuestions(url, status = 'published') {
       LEFT JOIN knowledge_points kp ON kp.id = qkp.knowledge_point_id
       LEFT JOIN textbooks tb ON tb.id = kp.textbook_id LEFT JOIN textbook_chapters tc ON tc.id = kp.chapter_id
       WHERE ${where.join(' AND ')} AND question_search MATCH ? GROUP BY q.id ORDER BY q.updated_at DESC`).all(...args, keyword.replace(/[^\p{L}\p{N}_-]+/gu, ' '));
+    if (!rows.length) {
+      const like = `%${keyword}%`;
+      rows = db.prepare(`SELECT q.id, q.bank_id, q.type, q.status, q.difficulty, qv.content_json
+        FROM questions q JOIN question_versions qv ON qv.id = q.current_version_id
+        JOIN question_search qs ON qs.question_id = CAST(q.id AS TEXT)
+        LEFT JOIN question_knowledge_points qkp ON qkp.question_id = q.id
+        LEFT JOIN knowledge_points kp ON kp.id = qkp.knowledge_point_id
+        LEFT JOIN textbooks tb ON tb.id = kp.textbook_id LEFT JOIN textbook_chapters tc ON tc.id = kp.chapter_id
+        WHERE ${where.join(' AND ')} AND (qs.stem LIKE ? OR qs.options LIKE ? OR qs.analysis LIKE ? OR qs.tags LIKE ?)
+        GROUP BY q.id ORDER BY q.updated_at DESC`).all(...args, like, like, like, like);
+    }
   } else {
     rows = db.prepare(`SELECT q.id, q.bank_id, q.type, q.status, q.difficulty, qv.content_json
       FROM questions q JOIN question_versions qv ON qv.id = q.current_version_id
