@@ -133,6 +133,13 @@ input:focus, select:focus, textarea:focus { border-color: #d2a052; box-shadow: 0
 .preview-crop { position: relative; overflow: hidden; width: 100%; height: 180px; background: #f1f3f4; border: 1px solid #d4dde3; }
 .preview-crop img { position: absolute; max-width: none; }
 .draft-review { border-top: 1px solid #e1e7eb; margin-top: 20px; padding-top: 16px; }
+.draft-review-panel { background: #fff; border: 1px solid #e1e7eb; border-radius: 7px; padding: 20px; margin-top: 16px; }
+.draft-review-grid { display: grid; gap: 12px; }
+.saved-draft { border: 1px solid #e1e7eb; border-radius: 6px; padding: 14px; }
+.saved-draft-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.saved-draft-parts { display: flex; flex-wrap: wrap; gap: 10px; border-top: 1px solid #edf0f2; padding-top: 10px; margin-top: 10px; }
+.draft-part { display: grid; gap: 4px; color: #788792; font-size: 11px; min-width: 180px; max-width: 260px; }
+.draft-part img { display: block; width: 100%; height: 150px; object-fit: cover; object-position: top left; border: 1px solid #d4dde3; background: #f1f3f4; }
 .draft-review h3 { margin: 0 0 10px; font-size: 15px; }
 .draft-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid #edf0f2; padding: 10px 0; }
 .badge { display: inline-flex; align-items: center; padding: 3px 7px; border-radius: 4px; font-size: 11px; background: #eef3f5; color: #64737e; }

@@ -78,6 +78,15 @@ test('本地题库主流程可运行', async () => {
   const appended = await request(`/api/imports/${manual.id}/segments/${segment.id}`, { method: 'PUT', body: JSON.stringify({ stem: '跨页测试题', parts: [...segment.content.parts, { pageNo: 1, role: 'stem', coordinateSpace: 'pdf', rect: { x: 30, y: 400, width: 520, height: 150 } }] }) });
   assert.equal(appended.page_start, 1);
   assert.equal(appended.page_end, 1);
+  const manualConfirmation = await request(`/api/imports/${manual.id}/confirm`, { method: 'POST', body: '{}' });
+  assert.equal(manualConfirmation.count, 1);
+  assert.equal(manualConfirmation.results[0].success, true);
+  const manualDrafts = await request(`/api/questions/review?sourceJobId=${manual.id}&status=draft`);
+  assert.equal(manualDrafts.total, 1);
+  assert.equal(manualDrafts.items[0].status, 'draft');
+  await request(`/api/questions/${manualConfirmation.importedQuestionIds[0]}/publish`, { method: 'POST', body: '{}' });
+  const publishedManual = await request(`/api/questions/search?bankId=${banks[0].id}&keyword=${encodeURIComponent('跨页测试题')}`);
+  assert.equal(publishedManual.total, 1);
   const cleared = await request(`/api/imports/${manual.id}/segments/clear`, { method: 'POST', body: '{}' });
   assert.equal(cleared.cleared, true);
 });
