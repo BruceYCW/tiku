@@ -365,7 +365,7 @@ async function api(request, response, url) {
       return questionId;
     }));
     db.prepare('UPDATE import_jobs SET status = \'completed\', progress = 100, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(jobId);
-    return send(response, 200, { importedQuestionIds: created, count: created.length, status: 'completed' });
+    return send(response, 200, { importedQuestionIds: created, count: created.length, status: 'completed', results: created.map((questionId) => ({ questionId, success: true, message: '已保存为题库草稿' })) });
   }
 
   const replaceMatch = pathname.match(/^\/api\/papers\/([^/]+)\/questions\/(\d+)\/replace$/);

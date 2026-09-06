@@ -120,6 +120,10 @@ input:focus, select:focus, textarea:focus { border-color: #d2a052; box-shadow: 0
 .icon-button:hover { color: #b33f3f; }
 .list-actions { display: grid; gap: 7px; padding-top: 12px; }
 .preview-grid { display: grid; gap: 13px; }
+.preview-meta { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin-bottom: 14px; }
+.preview-meta label { display: grid; gap: 5px; color: #53626d; font-size: 12px; font-weight: 600; }
+.preview-meta input { min-width: 190px; padding: 8px 10px; }
+.preview-actions { margin-bottom: 8px; }
 .preview-card { border: 1px solid #e1e7eb; border-radius: 6px; padding: 14px; background: #fff; }
 .preview-card-head { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; margin-bottom: 11px; }
 .preview-card-head span { color: #788792; font-size: 11px; }
