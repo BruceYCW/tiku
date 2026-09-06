@@ -161,7 +161,7 @@ function listQuestions(url, status = 'published') {
       LEFT JOIN question_knowledge_points qkp ON qkp.question_id = q.id
       LEFT JOIN knowledge_points kp ON kp.id = qkp.knowledge_point_id
       LEFT JOIN textbooks tb ON tb.id = kp.textbook_id LEFT JOIN textbook_chapters tc ON tc.id = kp.chapter_id
-      WHERE ${where.join(' AND ')} AND question_search MATCH ? GROUP BY q.id ORDER BY q.updated_at DESC`).all(...args, keyword.replace(/[^\p{L}\p{N}_-]+/gu, ' '));
+      WHERE ${where.join(' AND ')} AND question_search MATCH ? GROUP BY q.id ORDER BY q.updated_at DESC, q.id DESC`).all(...args, keyword.replace(/[^\p{L}\p{N}_-]+/gu, ' '));
     if (!rows.length) {
       const like = `%${keyword}%`;
       rows = db.prepare(`SELECT q.id, q.bank_id, q.type, q.status, q.difficulty, q.source_job_id, qv.content_json
@@ -171,7 +171,7 @@ function listQuestions(url, status = 'published') {
         LEFT JOIN knowledge_points kp ON kp.id = qkp.knowledge_point_id
         LEFT JOIN textbooks tb ON tb.id = kp.textbook_id LEFT JOIN textbook_chapters tc ON tc.id = kp.chapter_id
         WHERE ${where.join(' AND ')} AND (qs.stem LIKE ? OR qs.options LIKE ? OR qs.analysis LIKE ? OR qs.tags LIKE ?)
-        GROUP BY q.id ORDER BY q.updated_at DESC`).all(...args, like, like, like, like);
+        GROUP BY q.id ORDER BY q.updated_at DESC, q.id DESC`).all(...args, like, like, like, like);
     }
   } else {
     rows = db.prepare(`SELECT q.id, q.bank_id, q.type, q.status, q.difficulty, q.source_job_id, qv.content_json
@@ -179,19 +179,51 @@ function listQuestions(url, status = 'published') {
       LEFT JOIN question_knowledge_points qkp ON qkp.question_id = q.id
       LEFT JOIN knowledge_points kp ON kp.id = qkp.knowledge_point_id
       LEFT JOIN textbooks tb ON tb.id = kp.textbook_id LEFT JOIN textbook_chapters tc ON tc.id = kp.chapter_id
-      WHERE ${where.join(' AND ')} GROUP BY q.id ORDER BY q.updated_at DESC`).all(...args);
+      WHERE ${where.join(' AND ')} GROUP BY q.id ORDER BY q.updated_at DESC, q.id DESC`).all(...args);
   }
   return rows.map(questionView);
 }
-function makePdfPlaceholder(paper, snapshot) {
-  const text = [`题库系统试卷预览`, paper.name, '', ...snapshot.questions.map((question, index) => `${index + 1}. ${question.content.stem}`)].join('\n');
-  const escaped = text.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)').split('\n');
-  const commands = ['BT', '/F1 12 Tf', '50 780 Td', ...escaped.map((line, index) => `${index ? '0 -20 Td' : ''} (${line.slice(0, 100)}) Tj`), 'ET'].join('\n');
-  const objects = [`1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj`, `2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj`, `3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj`, `4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj`, `5 0 obj << /Length ${Buffer.byteLength(commands)} >> stream\n${commands}\nendstream endobj`];
-  let output = '%PDF-1.4\n'; const offsets = [0];
-  for (const object of objects) { offsets.push(Buffer.byteLength(output)); output += `${object}\n`; }
-  const xref = Buffer.byteLength(output); output += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n `).join('\n')}\ntrailer << /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
-  return Buffer.from(output);
+function pdfUtf16Hex(value) { const source = Buffer.from(String(value || ''), 'utf16le'); for (let index = 0; index < source.length; index += 2) [source[index], source[index + 1]] = [source[index + 1], source[index]]; return source.toString('hex').toUpperCase(); }
+function parsePdfImage(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return null;
+  const buffer = fs.readFileSync(filePath);
+  if (buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+    let offset = 8; let width = 0; let height = 0; let bitDepth = 0; let colorType = 0; let interlace = 0; const data = [];
+    while (offset + 12 <= buffer.length) { const length = buffer.readUInt32BE(offset); const type = buffer.toString('ascii', offset + 4, offset + 8); const chunk = buffer.subarray(offset + 8, offset + 8 + length); if (type === 'IHDR') { width = chunk.readUInt32BE(0); height = chunk.readUInt32BE(4); bitDepth = chunk[8]; colorType = chunk[9]; interlace = chunk[12]; } if (type === 'IDAT') data.push(chunk); offset += length + 12; if (type === 'IEND') break; }
+    if (width && height && bitDepth === 8 && colorType === 2 && interlace === 0 && data.length) return { type: 'png', width, height, data: Buffer.concat(data) };
+    return null;
+  }
+  if (buffer[0] === 0xff && buffer[1] === 0xd8) {
+    let offset = 2;
+    while (offset + 9 < buffer.length) { if (buffer[offset] !== 0xff) { offset += 1; continue; } const marker = buffer[offset + 1]; const length = buffer.readUInt16BE(offset + 2); if (marker >= 0xc0 && marker <= 0xc3) return { type: 'jpeg', width: buffer.readUInt16BE(offset + 7), height: buffer.readUInt16BE(offset + 5), data: buffer }; if (length < 2) break; offset += 2 + length; }
+  }
+  return null;
+}
+function questionSourceJobId(question) { return question.source_job_id || question.content?.attachments?.find((attachment) => attachment.path)?.path?.match(/\/api\/imports\/([^/]+)\/pages\//)?.[1] || ''; }
+function sourceImagePath(question, part) { const jobId = questionSourceJobId(question); if (!jobId) return ''; const row = db.prepare('SELECT image_path FROM import_pages WHERE job_id = ? AND page_no = ?').get(jobId, Number(part.pageNo)); return row?.image_path || ''; }
+function paperQuestionParts(question) { const content = question.content || {}; if (Array.isArray(content.parts) && content.parts.length) return content.parts; return (Array.isArray(content.attachments) ? content.attachments : []).filter((attachment) => attachment.type === 'page_image' && attachment.path).map((attachment) => ({ pageNo: Number(attachment.pageNo) || 1, role: 'stem', rect: { x: 0, y: 0, width: 595, height: 842 } })); }
+function buildPdf(objects) { let output = Buffer.from('%PDF-1.4\n%\xff\xff\xff\xff\n', 'latin1'); const offsets = [0]; objects.forEach((object, index) => { offsets.push(output.length); output = Buffer.concat([output, Buffer.from(`${index + 1} 0 obj\n`), object, Buffer.from('\nendobj\n')]); }); const xref = output.length; output = Buffer.concat([output, Buffer.from(`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n `).join('\n')}\ntrailer << /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`, 'latin1')]); return output; }
+function makePaperPdf(paper, snapshot) {
+  const pageWidth = 595; const pageHeight = 842; const margin = 36; const contentWidth = pageWidth - margin * 2; const gap = 12; const imageMap = new Map(); const pages = []; let current = null; let cursor = pageHeight - margin;
+  const newPage = () => { current = { commands: [], images: new Set() }; pages.push(current); cursor = pageHeight - margin; };
+  const imageFor = (question, part) => { const pathName = sourceImagePath(question, part); if (!pathName) return null; if (!imageMap.has(pathName)) { const image = parsePdfImage(pathName); if (image) imageMap.set(pathName, { ...image, name: `Im${imageMap.size + 1}`, path: pathName }); } return imageMap.get(pathName) || null; };
+  const textLines = (text) => String(text || '').replace(/\r/g, '').split('\n').flatMap((line) => { const value = line || ' '; const lines = []; for (let index = 0; index < value.length; index += 42) lines.push(value.slice(index, index + 42)); return lines; }).slice(0, 8);
+  const addText = (text, size = 10) => { textLines(text).forEach((line) => { if (cursor < margin + size) newPage(); current.commands.push(`BT /F1 ${size} Tf ${margin} ${Math.round(cursor - size)} Td <${pdfUtf16Hex(line)}> Tj ET`); cursor -= size + 4; }); };
+  newPage();
+  addText(paper.name || '未命名试卷', 14);
+  cursor -= 4;
+  addText(`总分：${paper.total_score || 0} 分    考试时间：________    姓名：________`, 10);
+  cursor -= 8;
+  (snapshot.questions || []).forEach((question, index) => {
+    const content = question.content || {}; const parts = paperQuestionParts(question).map((part) => ({ part, image: imageFor(question, part), page: (question.sourcePages || []).find((item) => Number(item.page_no) === Number(part.pageNo)) || { widthPt: 595, heightPt: 842 } })).filter((item) => item.image);
+    const stem = String(content.stem || '').trim(); const label = stem && !/^第?\s*\d+\s*题[（(]待补充题干[）)]$/.test(stem) ? `${index + 1}. ${stem}` : `${index + 1}.`; const labelHeight = textLines(label).length * 14 + 4; const imageHeights = parts.map(({ part }) => contentWidth * Math.max(Number(part.rect?.height) || 1, 1) / Math.max(Number(part.rect?.width) || 1, 1)); const totalHeight = labelHeight + imageHeights.reduce((sum, height) => sum + height + gap, 0);
+    if (cursor < pageHeight - margin && cursor - totalHeight < margin) newPage();
+    addText(label, 10);
+    if (!parts.length) { current.commands.push(`BT /F1 10 Tf ${margin} ${Math.round(cursor - 10)} Td <0054006500780074> Tj ET`); cursor -= 32; return; }
+    parts.forEach(({ part, image, page }) => { let targetWidth = contentWidth; let targetHeight = targetWidth * Math.max(Number(part.rect?.height) || 1, 1) / Math.max(Number(part.rect?.width) || 1, 1); if (targetHeight > pageHeight - margin * 2) { targetHeight = pageHeight - margin * 2; targetWidth = targetHeight * Math.max(Number(part.rect?.width) || 1, 1) / Math.max(Number(part.rect?.height) || 1, 1); } if (cursor - targetHeight < margin) newPage(); const x = margin + (contentWidth - targetWidth) / 2; const y = cursor - targetHeight; const rect = part.rect || { x: 0, y: 0, width: page.widthPt, height: page.heightPt }; const pageWidthPt = Math.max(Number(page.widthPt) || pageWidth, 1); const pageHeightPt = Math.max(Number(page.heightPt) || pageHeight, 1); const scaleX = targetWidth * pageWidthPt / Math.max(Number(rect.width), 1); const scaleY = targetHeight * pageHeightPt / Math.max(Number(rect.height), 1); const sourceBottom = pageHeightPt - Number(rect.y || 0) - Number(rect.height || 0); const tx = x - Number(rect.x || 0) / pageWidthPt * scaleX; const ty = y - sourceBottom / pageHeightPt * scaleY; current.images.add(image.path); current.commands.push(`q ${x.toFixed(2)} ${y.toFixed(2)} ${targetWidth.toFixed(2)} ${targetHeight.toFixed(2)} re W n q ${scaleX.toFixed(6)} 0 0 ${scaleY.toFixed(6)} ${tx.toFixed(2)} ${ty.toFixed(2)} cm /${image.name} Do Q Q`); cursor = y - gap; });
+    cursor -= 8;
+  });
+  const objects = []; const addObject = (value) => { objects.push(Buffer.isBuffer(value) ? value : Buffer.from(value, 'latin1')); return objects.length; }; const catalogId = addObject(Buffer.alloc(0)); const pagesId = addObject(Buffer.alloc(0)); const fontId = addObject('<< /Type /Font /Subtype /Type0 /BaseFont /STSong-Light /Encoding /UniGB-UCS2-H /DescendantFonts [4 0 R] >>'); addObject('<< /Type /Font /Subtype /CIDFontType0 /BaseFont /STSong-Light /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 4 >> >>'); const imageIds = new Map(); imageMap.forEach((image) => { const body = image.type === 'png' ? `<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns ${image.width} >> /Length ${image.data.length} >>\nstream\n` : `<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${image.data.length} >>\nstream\n`; imageIds.set(image.path, addObject(Buffer.concat([Buffer.from(body, 'latin1'), image.data, Buffer.from('\nendstream', 'latin1')]))); }); const contentIds = pages.map((page) => addObject(Buffer.from(`<< /Length ${Buffer.byteLength(page.commands.join('\n'))} >>\nstream\n${page.commands.join('\n')}\nendstream`, 'latin1'))); const pageIds = pages.map((page, index) => { const xobjects = [...page.images].map((pathName) => { const image = imageMap.get(pathName); return `/${image.name} ${imageIds.get(pathName)} 0 R`; }).join(' '); return addObject(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontId} 0 R >> /XObject << ${xobjects} >> >> /Contents ${contentIds[index]} 0 R >>`); }); objects[pagesId - 1] = Buffer.from(`<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`, 'latin1'); objects[catalogId - 1] = Buffer.from(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`, 'latin1'); return buildPdf(objects);
 }
 
 async function api(request, response, url) {
@@ -476,8 +508,8 @@ async function api(request, response, url) {
     const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(paperMatch[1]); if (!paper) return fail(response, 404, '试卷不存在');
     const snapshotRow = db.prepare('SELECT * FROM paper_snapshots WHERE paper_id = ? ORDER BY id DESC LIMIT 1').get(paper.id);
     if (!snapshotRow) return fail(response, 409, '请先确认试卷快照');
-    const snapshot = json(snapshotRow.snapshot_json, {}); const pdf = makePdfPlaceholder(paper, snapshot); const pdfPath = path.join(paths.exports, `${paper.id}.pdf`); fs.writeFileSync(pdfPath, pdf); db.prepare('UPDATE paper_snapshots SET pdf_path = ? WHERE id = ?').run(pdfPath, snapshotRow.id); db.prepare('UPDATE papers SET status = \'exported\' WHERE id = ?').run(paper.id);
-    return send(response, 200, { fileName: path.basename(pdfPath), downloadUrl: `/api/exports/${paper.id}`, path: pdfPath, bytes: pdf.length, note: '当前骨架已生成本地 PDF 文件；中文字体嵌入和复杂排版将在排版适配器阶段接入。' });
+    const snapshot = json(snapshotRow.snapshot_json, {}); const pdf = makePaperPdf(paper, snapshot); const pdfPath = path.join(paths.exports, `${paper.id}.pdf`); fs.writeFileSync(pdfPath, pdf); db.prepare('UPDATE paper_snapshots SET pdf_path = ? WHERE id = ?').run(pdfPath, snapshotRow.id); db.prepare('UPDATE papers SET status = \'exported\' WHERE id = ?').run(paper.id);
+    return send(response, 200, { fileName: path.basename(pdfPath), downloadUrl: `/api/exports/${paper.id}`, path: pdfPath, bytes: pdf.length, note: '已按组卷预览顺序生成本地 PDF，题目图片来自已保存的切割区域。' });
   }
   const exportMatch = pathname.match(/^\/api\/exports\/([^/]+)$/);
   if (method === 'GET' && exportMatch) {

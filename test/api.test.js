@@ -68,7 +68,11 @@ test('本地题库主流程可运行', async () => {
   const exported = await request(`/api/papers/${paper.id}/export-pdf`, { method: 'POST', body: '{}' });
   assert.ok(exported.downloadUrl);
   const pdf = await request(exported.downloadUrl);
-  assert.equal(Buffer.from(pdf).subarray(0, 5).toString(), '%PDF-');
+  const pdfBuffer = Buffer.from(pdf);
+  const pdfSource = pdfBuffer.toString('latin1');
+  assert.equal(pdfBuffer.subarray(0, 5).toString(), '%PDF-');
+  assert.match(pdfSource, /\/BaseFont \/STSong-Light/);
+  assert.doesNotMatch(pdfSource, /\/BaseFont \/Helvetica/);
 
   const manual = await request('/api/imports/papers', { method: 'POST', body: JSON.stringify({ bankId: banks[0].id, year: '2025', title: '手动框选测试卷', fileName: 'manual.txt', fileType: 'txt', text: '原始页内容', manualCut: true }) });
   assert.equal(manual.candidateCount, 0);
