@@ -52,7 +52,10 @@ test('本地题库主流程可运行', async () => {
   assert.equal(reviewedCandidate.candidates[0].selection.width, 0.8);
   const confirmation = await request(`/api/imports/${imported.id}/confirm`, { method: 'POST', body: '{}' });
   assert.equal(confirmation.count, 2);
-  for (const questionId of confirmation.importedQuestionIds) await request(`/api/questions/${questionId}/publish`, { method: 'POST', body: '{}' });
+  const publishedAll = await request('/api/questions/publish-all', { method: 'POST', body: JSON.stringify({ sourceJobId: imported.id }) });
+  assert.equal(publishedAll.total, 2);
+  assert.equal(publishedAll.publishedCount, 2);
+  assert.equal(publishedAll.failedCount, 0);
   const search = await request(`/api/questions/search?bankId=${banks[0].id}&keyword=${encodeURIComponent('集合的概念校对题')}`);
   assert.ok(search.items.some((item) => item.content.stem.includes('集合的概念校对题')));
   assert.equal('answer_json' in search.items[0], false);
@@ -87,6 +90,8 @@ test('本地题库主流程可运行', async () => {
   await request(`/api/questions/${manualConfirmation.importedQuestionIds[0]}/publish`, { method: 'POST', body: '{}' });
   const publishedManual = await request(`/api/questions/search?bankId=${banks[0].id}&keyword=${encodeURIComponent('跨页测试题')}`);
   assert.equal(publishedManual.total, 1);
+  assert.equal(publishedManual.items[0].source_job_id, manual.id);
+  assert.equal(publishedManual.items[0].sourcePages.length, 1);
   const chineseKeyword = await request(`/api/questions/search?bankId=${banks[0].id}&keyword=${encodeURIComponent('集合')}`);
   assert.ok(chineseKeyword.items.some((item) => item.content.stem.includes('集合')));
   const cleared = await request(`/api/imports/${manual.id}/segments/clear`, { method: 'POST', body: '{}' });

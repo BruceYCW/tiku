@@ -137,7 +137,8 @@ function questionView(row) {
     FROM question_knowledge_points qkp JOIN knowledge_points kp ON kp.id = qkp.knowledge_point_id
     LEFT JOIN textbooks tb ON tb.id = kp.textbook_id LEFT JOIN textbook_chapters tc ON tc.id = kp.chapter_id
     WHERE qkp.question_id = ?`).all(questionId);
-  return { ...row, content, knowledgePoints: points };
+  const sourcePages = row.source_job_id ? db.prepare('SELECT page_no, width_pt AS widthPt, height_pt AS heightPt FROM import_pages WHERE job_id = ? ORDER BY page_no').all(row.source_job_id) : [];
+  return { ...row, content, sourcePages, knowledgePoints: points };
 }
 function listQuestions(url, status = 'published') {
   const params = url.searchParams;
@@ -154,7 +155,7 @@ function listQuestions(url, status = 'published') {
   const keyword = params.get('keyword')?.trim();
   let rows;
   if (keyword) {
-    rows = db.prepare(`SELECT q.id, q.bank_id, q.type, q.status, q.difficulty, qv.content_json
+    rows = db.prepare(`SELECT q.id, q.bank_id, q.type, q.status, q.difficulty, q.source_job_id, qv.content_json
       FROM questions q JOIN question_versions qv ON qv.id = q.current_version_id
       JOIN question_search qs ON qs.question_id = CAST(q.id AS TEXT)
       LEFT JOIN question_knowledge_points qkp ON qkp.question_id = q.id
@@ -163,7 +164,7 @@ function listQuestions(url, status = 'published') {
       WHERE ${where.join(' AND ')} AND question_search MATCH ? GROUP BY q.id ORDER BY q.updated_at DESC`).all(...args, keyword.replace(/[^\p{L}\p{N}_-]+/gu, ' '));
     if (!rows.length) {
       const like = `%${keyword}%`;
-      rows = db.prepare(`SELECT q.id, q.bank_id, q.type, q.status, q.difficulty, qv.content_json
+      rows = db.prepare(`SELECT q.id, q.bank_id, q.type, q.status, q.difficulty, q.source_job_id, qv.content_json
         FROM questions q JOIN question_versions qv ON qv.id = q.current_version_id
         JOIN question_search qs ON qs.question_id = CAST(q.id AS TEXT)
         LEFT JOIN question_knowledge_points qkp ON qkp.question_id = q.id
@@ -173,7 +174,7 @@ function listQuestions(url, status = 'published') {
         GROUP BY q.id ORDER BY q.updated_at DESC`).all(...args, like, like, like, like);
     }
   } else {
-    rows = db.prepare(`SELECT q.id, q.bank_id, q.type, q.status, q.difficulty, qv.content_json
+    rows = db.prepare(`SELECT q.id, q.bank_id, q.type, q.status, q.difficulty, q.source_job_id, qv.content_json
       FROM questions q JOIN question_versions qv ON qv.id = q.current_version_id
       LEFT JOIN question_knowledge_points qkp ON qkp.question_id = q.id
       LEFT JOIN knowledge_points kp ON kp.id = qkp.knowledge_point_id
@@ -210,6 +211,27 @@ async function api(request, response, url) {
   if (method === 'GET' && pathname === '/api/knowledge-points') return send(response, 200, db.prepare(`SELECT kp.*, tb.name AS textbook_name, tc.name AS chapter_name FROM knowledge_points kp LEFT JOIN textbooks tb ON tb.id = kp.textbook_id LEFT JOIN textbook_chapters tc ON tc.id = kp.chapter_id ORDER BY kp.id`).all());
   if (method === 'GET' && pathname === '/api/questions/search') { const items = listQuestions(url); return send(response, 200, { items, total: items.length }); }
   if (method === 'GET' && pathname === '/api/questions/review') { const items = listQuestions(url, paramsStatus(url)); return send(response, 200, { items, total: items.length }); }
+
+  if (method === 'POST' && pathname === '/api/questions/publish-all') {
+    const input = await body(request);
+    const sourceJobId = String(input.sourceJobId || '').trim();
+    if (!sourceJobId) return fail(response, 400, '缺少导入任务编号');
+    const questions = db.prepare('SELECT id, status FROM questions WHERE source_job_id = ? AND status = \'draft\' ORDER BY id').all(sourceJobId);
+    const results = [];
+    for (const question of questions) {
+      try {
+        const version = db.prepare('SELECT content_json FROM question_versions WHERE id = (SELECT current_version_id FROM questions WHERE id = ?)').get(question.id);
+        const content = json(version?.content_json, {});
+        validateContent(content, normalizeType(content.type, content));
+        db.prepare('UPDATE questions SET status = \'published\', updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(question.id);
+        indexQuestion(question.id);
+        results.push({ id: question.id, success: true, status: 'published' });
+      } catch (error) {
+        results.push({ id: question.id, success: false, status: 'draft', reason: error.message });
+      }
+    }
+    return send(response, 200, { sourceJobId, total: questions.length, publishedCount: results.filter((item) => item.success).length, failedCount: results.filter((item) => !item.success).length, results });
+  }
 
   const questionStatusMatch = pathname.match(/^\/api\/questions\/(\d+)\/(publish|offline)$/);
   if (method === 'POST' && questionStatusMatch) {
