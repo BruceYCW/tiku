@@ -217,6 +217,8 @@ async function api(request, response, url) {
 
   if (method === 'POST' && pathname === '/api/imports/papers') {
     const input = await body(request);
+    if (!String(input.year || '').trim()) return fail(response, 400, '年份不能为空');
+    if (!String(input.title || '').trim()) return fail(response, 400, '试卷标题不能为空');
     const fileName = safeName(input.fileName || 'import.txt');
     const content = input.contentBase64 ? Buffer.from(input.contentBase64, 'base64') : Buffer.from(String(input.text || ''), 'utf8');
     const jobId = id(); const filePath = path.join(paths.imports, `${jobId}-${fileName}`);
@@ -237,11 +239,11 @@ async function api(request, response, url) {
       combinedLines.push(...pageLines, '');
       pageRanges.push({ pageNo: page.pageNo, start, end: combinedLines.length, imagePath: page.imagePath ? `/api/imports/${jobId}/pages/${page.pageNo}/image` : '' });
     });
-    const candidates = parseTextCandidates(combinedLines.join('\n'), 1, '', pageRanges);
+    const candidates = input.manualCut ? [] : parseTextCandidates(combinedLines.join('\n'), 1, '', pageRanges);
     transaction(() => {
-      db.prepare('INSERT INTO import_jobs(id, bank_id, file_name, file_type, file_path, source_hash, status, progress, error_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(jobId, Number(input.bankId || 1), fileName, type, filePath, hash, candidates.length ? 'waiting_review' : 'uploaded', candidates.length ? 70 : 10, parsed.message);
+      db.prepare('INSERT INTO import_jobs(id, bank_id, file_name, file_type, file_path, source_hash, status, progress, error_message, paper_year, paper_title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(jobId, Number(input.bankId || 1), fileName, type, filePath, hash, candidates.length ? 'waiting_review' : 'uploaded', candidates.length ? 70 : 10, parsed.message, String(input.year).trim(), String(input.title).trim());
       const pages = parsed.pages.length ? parsed.pages : [{ pageNo: 1, text: parsed.text, imagePath: '' }];
-      pages.forEach((page) => db.prepare('INSERT INTO import_pages(job_id, page_no, image_path, ocr_text, status) VALUES (?, ?, ?, ?, ?)').run(jobId, page.pageNo, page.imagePath, page.text, page.text || page.imagePath ? 'completed' : 'pending'));
+      pages.forEach((page) => db.prepare('INSERT INTO import_pages(job_id, page_no, image_path, ocr_text, status, width_pt, height_pt) VALUES (?, ?, ?, ?, ?, ?, ?)').run(jobId, page.pageNo, page.imagePath, page.text, page.text || page.imagePath ? 'completed' : 'pending', page.widthPt || 595, page.heightPt || 842));
       candidates.forEach((content) => {
         const candidateId = id();
         db.prepare(`INSERT INTO import_candidates(id, job_id, page_start, page_end, content_json, auto_content_json, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)`)
@@ -250,7 +252,7 @@ async function api(request, response, url) {
         for (const point of classifyKnowledgePoints(content.content, bank.id)) db.prepare('INSERT INTO candidate_knowledge_points(candidate_id, knowledge_point_id, source, confidence) VALUES (?, ?, ?, ?)').run(candidateId, point.id, 'rule', point.confidence);
       });
     });
-    return send(response, 201, { id: jobId, status: candidates.length ? 'waiting_review' : 'uploaded', candidateCount: candidates.length, parser: parsed.source, message: candidates.length ? '已生成候选，请人工校对' : parsed.message || '文件已保存，等待本地解析/OCR适配器处理' });
+    return send(response, 201, { id: jobId, status: candidates.length ? 'waiting_review' : 'uploaded', candidateCount: candidates.length, pageCount: parsed.pages.length, parser: parsed.source, message: candidates.length ? '已生成候选，请人工校对' : parsed.message || '文件已保存，等待本地解析/OCR适配器处理' });
   }
   const importMatch = pathname.match(/^\/api\/imports\/([^/]+)$/);
   const pageImageMatch = pathname.match(/^\/api\/imports\/([^/]+)\/pages\/(\d+)\/image$/);
@@ -264,7 +266,14 @@ async function api(request, response, url) {
   if (method === 'GET' && importMatch) {
     const job = db.prepare('SELECT * FROM import_jobs WHERE id = ?').get(importMatch[1]);
     if (!job) return fail(response, 404, '导入任务不存在');
-    return send(response, 200, { ...job, candidates: db.prepare('SELECT * FROM import_candidates WHERE job_id = ? ORDER BY rowid').all(job.id).map(candidateView) });
+    return send(response, 200, { ...job, pages: db.prepare('SELECT page_no, image_path, status, width_pt AS widthPt, height_pt AS heightPt FROM import_pages WHERE job_id = ? ORDER BY page_no').all(job.id).map((page) => ({ ...page, imageUrl: page.image_path ? `/api/imports/${job.id}/pages/${page.page_no}/image` : '' })), candidates: db.prepare('SELECT * FROM import_candidates WHERE job_id = ? ORDER BY rowid').all(job.id).map(candidateView) });
+  }
+  if (method === 'PUT' && importMatch) {
+    const input = await body(request); const job = db.prepare('SELECT id FROM import_jobs WHERE id = ?').get(importMatch[1]);
+    if (!job) return fail(response, 404, '导入任务不存在');
+    if (!String(input.year || '').trim() || !String(input.title || '').trim()) return fail(response, 400, '年份和试卷标题不能为空');
+    db.prepare('UPDATE import_jobs SET paper_year = ?, paper_title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(String(input.year).trim(), String(input.title).trim(), job.id);
+    return send(response, 200, { id: job.id, year: String(input.year).trim(), title: String(input.title).trim() });
   }
   const candidatesMatch = pathname.match(/^\/api\/imports\/([^/]+)\/candidates$/);
   if (method === 'GET' && candidatesMatch) return send(response, 200, db.prepare('SELECT * FROM import_candidates WHERE job_id = ? ORDER BY rowid').all(candidatesMatch[1]).map(candidateView));
@@ -285,6 +294,49 @@ async function api(request, response, url) {
       transaction(() => { db.prepare('DELETE FROM candidate_knowledge_points WHERE candidate_id = ?').run(candidate.id); for (const pointId of input.knowledgePointIds) db.prepare('INSERT INTO candidate_knowledge_points(candidate_id, knowledge_point_id, source, confirmed) VALUES (?, ?, ?, 1)').run(candidate.id, pointId, 'manual'); });
     }
     return send(response, 200, candidateView(db.prepare('SELECT * FROM import_candidates WHERE id = ?').get(candidate.id)));
+  }
+  const segmentsMatch = pathname.match(/^\/api\/imports\/([^/]+)\/segments$/);
+  if (method === 'POST' && segmentsMatch) {
+    const input = await body(request); const job = db.prepare('SELECT * FROM import_jobs WHERE id = ?').get(segmentsMatch[1]);
+    if (!job) return fail(response, 404, '导入任务不存在');
+    const parts = Array.isArray(input.parts) ? input.parts : [];
+    if (!parts.length || !parts.some((part) => part.role === 'stem') || parts.some((part) => !Number.isInteger(Number(part.pageNo)) || !part.rect || ['x', 'y', 'width', 'height'].some((key) => !Number.isFinite(Number(part.rect[key])) || Number(part.rect[key]) < 0) || Number(part.rect.width) <= 0 || Number(part.rect.height) <= 0)) return fail(response, 400, '题目区域必须包含至少一个题干框和合法的 PDF 坐标');
+    const content = { number: String(input.number || db.prepare('SELECT COUNT(*) AS count FROM import_candidates WHERE job_id = ?').get(job.id).count + 1), stem: String(input.stemText || `第${input.number || ''}题（待补充题干）`).trim(), options: [], attachments: parts.filter((part) => part.role === 'image').map((part) => ({ type: 'region', pageNo: part.pageNo, rect: part.rect })) , parts, mode: input.mode || 'box' };
+    const candidateId = id();
+    db.prepare('INSERT INTO import_candidates(id, job_id, page_start, page_end, content_json, auto_content_json, confidence, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(candidateId, job.id, Math.min(...parts.map((part) => Number(part.pageNo))), Math.max(...parts.map((part) => Number(part.pageNo))), JSON.stringify(content), JSON.stringify(content), 1, 'pending_review');
+    db.prepare('UPDATE import_candidates SET attachments_json = ? WHERE id = ?').run(JSON.stringify(content.attachments), candidateId);
+    return send(response, 201, candidateView(db.prepare('SELECT * FROM import_candidates WHERE id = ?').get(candidateId)));
+  }
+  const segmentMatch = pathname.match(/^\/api\/imports\/([^/]+)\/segments\/([^/]+)$/);
+  if (method === 'PUT' && segmentMatch) {
+    const input = await body(request); const candidate = db.prepare('SELECT * FROM import_candidates WHERE id = ? AND job_id = ?').get(segmentMatch[2], segmentMatch[1]);
+    if (!candidate) return fail(response, 404, '题目不存在');
+    const current = json(candidate.content_json, {}); const content = { ...current, ...input, parts: Array.isArray(input.parts) ? input.parts : current.parts || [] };
+    if (!content.stem || !content.parts.length) return fail(response, 400, '题目至少需要一个题干区域');
+    content.attachments = content.parts.filter((part) => part.role === 'image').map((part) => ({ type: 'region', pageNo: part.pageNo, rect: part.rect }));
+    db.prepare('UPDATE import_candidates SET content_json = ?, answer_json = ?, analysis = ?, attachments_json = ?, page_start = ?, page_end = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(JSON.stringify(content), JSON.stringify(input.answer || json(candidate.answer_json, [])), input.analysis || candidate.analysis || '', JSON.stringify(content.attachments), Math.min(...content.parts.map((part) => Number(part.pageNo))), Math.max(...content.parts.map((part) => Number(part.pageNo))), candidate.id);
+    return send(response, 200, candidateView(db.prepare('SELECT * FROM import_candidates WHERE id = ?').get(candidate.id)));
+  }
+  if (method === 'DELETE' && segmentMatch) {
+    const result = db.prepare('DELETE FROM import_candidates WHERE id = ? AND job_id = ?').run(segmentMatch[2], segmentMatch[1]);
+    if (!result.changes) return fail(response, 404, '题目不存在');
+    return send(response, 200, { id: segmentMatch[2], deleted: true });
+  }
+  const clearSegmentsMatch = pathname.match(/^\/api\/imports\/([^/]+)\/segments\/clear$/);
+  if (method === 'POST' && clearSegmentsMatch) {
+    db.prepare('DELETE FROM import_candidates WHERE job_id = ?').run(clearSegmentsMatch[1]);
+    return send(response, 200, { jobId: clearSegmentsMatch[1], cleared: true });
+  }
+  const mergeMatch = pathname.match(/^\/api\/imports\/([^/]+)\/segments\/merge$/);
+  if (method === 'POST' && mergeMatch) {
+    const input = await body(request); const ids = Array.isArray(input.ids) ? input.ids : [];
+    if (ids.length < 2) return fail(response, 400, '至少选择两道相邻题目合并');
+    const rows = ids.map((candidateId) => db.prepare('SELECT * FROM import_candidates WHERE id = ? AND job_id = ?').get(candidateId, mergeMatch[1])).filter(Boolean);
+    if (rows.length !== ids.length) return fail(response, 404, '待合并题目不存在');
+    const parts = rows.flatMap((row) => json(row.content_json, {}).parts || []); const first = json(rows[0].content_json, {}); first.parts = parts; first.stem = input.stem || first.stem; first.attachments = parts.filter((part) => part.role === 'image').map((part) => ({ type: 'region', pageNo: part.pageNo, rect: part.rect }));
+    db.prepare('UPDATE import_candidates SET content_json = ?, attachments_json = ?, page_start = ?, page_end = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(JSON.stringify(first), JSON.stringify(first.attachments), Math.min(...parts.map((part) => Number(part.pageNo))), Math.max(...parts.map((part) => Number(part.pageNo))), rows[0].id);
+    db.prepare(`DELETE FROM import_candidates WHERE job_id = ? AND id IN (${ids.slice(1).map(() => '?').join(',')})`).run(mergeMatch[1], ...ids.slice(1));
+    return send(response, 200, candidateView(db.prepare('SELECT * FROM import_candidates WHERE id = ?').get(rows[0].id)));
   }
   if (method === 'POST' && candidateMatch?.[3] === 'crop') {
     const input = await body(request); const candidateId = candidateMatch[2];

@@ -79,6 +79,14 @@ function renderPdfPages(filePath, outputDir) {
   return fs.readdirSync(outputDir).filter((name) => /^page-\d+\.png$/.test(name)).sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0])).map((name) => path.join(outputDir, name));
 }
 
+function pdfPageSize(filePath) {
+  try {
+    const output = childProcess.execFileSync(process.platform === 'win32' ? 'pdfinfo.exe' : 'pdfinfo', [filePath], { encoding: 'utf8', timeout: 10000 });
+    const match = output.match(/Page size:\s*([\d.]+)\s*x\s*([\d.]+)\s*points/i);
+    return match ? { widthPt: Number(match[1]), heightPt: Number(match[2]) } : { widthPt: 595, heightPt: 842 };
+  } catch { return { widthPt: 595, heightPt: 842 }; }
+}
+
 function splitPages(text) { return String(text || '').split(/\f/).map((page) => page.trim()).filter(Boolean); }
 
 export function parseImportContent({ type, buffer, filePath, pageOutputDir, providedText = '' }) {
@@ -88,7 +96,8 @@ export function parseImportContent({ type, buffer, filePath, pageOutputDir, prov
   if (!text && type === 'pdf') { text = pythonPdfText(filePath) || pdfTextFallback(buffer); source = text ? 'pdf-local-text' : 'pdf-render'; if (!text) message = 'PDF 未提取到文本，已渲染页面；请安装本地 OCR 适配器处理扫描内容'; }
   if (type === 'pdf' && pageOutputDir) pageImages = renderPdfPages(filePath, pageOutputDir);
   if (!text && ['png', 'jpg', 'jpeg'].includes(type)) { text = localOcr(filePath); source = 'tesseract'; if (!text) message = '未检测到可用的本地 Tesseract OCR，原文件已保存，任务等待 OCR 适配器处理'; }
-  const pages = splitPages(text).map((pageText, index) => ({ pageNo: index + 1, text: pageText, imagePath: pageImages[index] || '' }));
-  if (!pages.length && pageImages.length) pageImages.forEach((imagePath, index) => pages.push({ pageNo: index + 1, text: '', imagePath }));
+  const size = type === 'pdf' ? pdfPageSize(filePath) : { widthPt: 595, heightPt: 842 };
+  const pages = splitPages(text).map((pageText, index) => ({ pageNo: index + 1, text: pageText, imagePath: pageImages[index] || '', ...size }));
+  if (!pages.length && pageImages.length) pageImages.forEach((imagePath, index) => pages.push({ pageNo: index + 1, text: '', imagePath, ...size }));
   return { text, pages, pageImages, source, message };
 }

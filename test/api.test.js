@@ -36,7 +36,7 @@ test('本地题库主流程可运行', async () => {
   assert.ok(banks.length > 0);
   const points = await request('/api/knowledge-points');
   const text = '1. 集合的概念题目？\nA. 选项一\nB. 选项二\n【答案】A\n【解析】这是解析内容。\n\n2. 第二道判断题。';
-  const imported = await request('/api/imports/papers', { method: 'POST', body: JSON.stringify({ bankId: banks[0].id, fileName: 'sample.txt', fileType: 'txt', text }) });
+  const imported = await request('/api/imports/papers', { method: 'POST', body: JSON.stringify({ bankId: banks[0].id, year: '2025', title: '本地测试卷', fileName: 'sample.txt', fileType: 'txt', text }) });
   assert.equal(imported.candidateCount, 2);
   const job = await request(`/api/imports/${imported.id}`);
   assert.equal(job.candidates.length, 2);
@@ -66,4 +66,18 @@ test('本地题库主流程可运行', async () => {
   assert.ok(exported.downloadUrl);
   const pdf = await request(exported.downloadUrl);
   assert.equal(Buffer.from(pdf).subarray(0, 5).toString(), '%PDF-');
+
+  const manual = await request('/api/imports/papers', { method: 'POST', body: JSON.stringify({ bankId: banks[0].id, year: '2025', title: '手动框选测试卷', fileName: 'manual.txt', fileType: 'txt', text: '原始页内容', manualCut: true }) });
+  assert.equal(manual.candidateCount, 0);
+  assert.equal(manual.pageCount, 1);
+  const manualJob = await request(`/api/imports/${manual.id}`);
+  assert.equal(manualJob.paper_year, '2025');
+  assert.equal(manualJob.paper_title, '手动框选测试卷');
+  const segment = await request(`/api/imports/${manual.id}/segments`, { method: 'POST', body: JSON.stringify({ mode: 'box', number: 1, parts: [{ pageNo: 1, role: 'stem', coordinateSpace: 'pdf', rect: { x: 30, y: 50, width: 520, height: 150 } }, { pageNo: 1, role: 'image', coordinateSpace: 'pdf', rect: { x: 80, y: 220, width: 200, height: 120 } }] }) });
+  assert.equal(segment.content.parts.length, 2);
+  const appended = await request(`/api/imports/${manual.id}/segments/${segment.id}`, { method: 'PUT', body: JSON.stringify({ stem: '跨页测试题', parts: [...segment.content.parts, { pageNo: 1, role: 'stem', coordinateSpace: 'pdf', rect: { x: 30, y: 400, width: 520, height: 150 } }] }) });
+  assert.equal(appended.page_start, 1);
+  assert.equal(appended.page_end, 1);
+  const cleared = await request(`/api/imports/${manual.id}/segments/clear`, { method: 'POST', body: '{}' });
+  assert.equal(cleared.cleared, true);
 });

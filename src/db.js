@@ -25,6 +25,8 @@ db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY,
 const migrations = [
   ['001_initial', path.join(projectRoot, 'migrations', '001_initial.sql')],
   ['002_import_structure', path.join(projectRoot, 'migrations', '002_import_structure.sql')]
+  ,['003_import_registration', path.join(projectRoot, 'migrations', '003_import_registration.sql')]
+  ,['004_page_dimensions', path.join(projectRoot, 'migrations', '004_page_dimensions.sql')]
 ];
 for (const [version, migrationPath] of migrations) {
   if (!db.prepare('SELECT version FROM schema_migrations WHERE version = ?').get(version)) {

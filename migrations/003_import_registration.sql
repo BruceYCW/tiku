@@ -1,0 +1,2 @@
+ALTER TABLE import_jobs ADD COLUMN paper_year TEXT NOT NULL DEFAULT '';
+ALTER TABLE import_jobs ADD COLUMN paper_title TEXT NOT NULL DEFAULT '';
