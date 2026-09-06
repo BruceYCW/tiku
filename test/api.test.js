@@ -94,6 +94,16 @@ test('本地题库主流程可运行', async () => {
   assert.equal(publishedManual.items[0].sourcePages.length, 1);
   const chineseKeyword = await request(`/api/questions/search?bankId=${banks[0].id}&keyword=${encodeURIComponent('集合')}`);
   assert.ok(chineseKeyword.items.some((item) => item.content.stem.includes('集合')));
+  const paperWithImportedQuestion = await request('/api/papers/generate', { method: 'POST', body: JSON.stringify({ name: '图片题预览测试卷', rule: { bankId: banks[0].id, typeCounts: { short_answer: 1 }, scores: { short_answer: 10 } } }) });
+  const paperWithSource = await request(`/api/papers/${paperWithImportedQuestion.id}`);
+  assert.ok(paperWithSource.questions.some((item) => item.content.parts?.length));
+  await request(`/api/questions/${manualConfirmation.importedQuestionIds[0]}`, { method: 'DELETE' });
+  const deletedSearch = await request(`/api/questions/search?bankId=${banks[0].id}&keyword=${encodeURIComponent('跨页测试题')}`);
+  assert.equal(deletedSearch.total, 0);
+  const batchDelete = await request('/api/questions/delete-batch', { method: 'POST', body: JSON.stringify({ ids: [confirmation.importedQuestionIds[0], confirmation.importedQuestionIds[1]] }) });
+  assert.equal(batchDelete.deletedCount, 2);
+  const batchDeletedSearch = await request(`/api/questions/search?bankId=${banks[0].id}&keyword=${encodeURIComponent('集合的概念校对题')}`);
+  assert.equal(batchDeletedSearch.total, 0);
   const cleared = await request(`/api/imports/${manual.id}/segments/clear`, { method: 'POST', body: '{}' });
   assert.equal(cleared.cleared, true);
 });

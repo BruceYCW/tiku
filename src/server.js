@@ -212,6 +212,27 @@ async function api(request, response, url) {
   if (method === 'GET' && pathname === '/api/questions/search') { const items = listQuestions(url); return send(response, 200, { items, total: items.length }); }
   if (method === 'GET' && pathname === '/api/questions/review') { const items = listQuestions(url, paramsStatus(url)); return send(response, 200, { items, total: items.length }); }
 
+  const questionDeleteMatch = pathname.match(/^\/api\/questions\/(\d+)$/);
+  if (method === 'DELETE' && questionDeleteMatch) {
+    const question = db.prepare('SELECT id, status FROM questions WHERE id = ?').get(questionDeleteMatch[1]);
+    if (!question) return fail(response, 404, '题目不存在');
+    db.prepare('UPDATE questions SET status = \'archived\', updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(question.id);
+    db.prepare('DELETE FROM question_search WHERE question_id = ?').run(String(question.id));
+    return send(response, 200, { id: question.id, status: 'archived' });
+  }
+  if (method === 'POST' && pathname === '/api/questions/delete-batch') {
+    const input = await body(request);
+    const ids = [...new Set((Array.isArray(input.ids) ? input.ids : []).map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0))];
+    if (!ids.length) return fail(response, 400, '请至少选择一道题目');
+    const placeholders = ids.map(() => '?').join(',');
+    const questions = db.prepare(`SELECT id FROM questions WHERE id IN (${placeholders})`).all(...ids);
+    transaction(() => {
+      db.prepare(`UPDATE questions SET status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`).run(...ids);
+      questions.forEach((question) => db.prepare('DELETE FROM question_search WHERE question_id = ?').run(String(question.id)));
+    });
+    return send(response, 200, { requestedCount: ids.length, deletedCount: questions.length, status: 'archived', ids: questions.map((question) => question.id) });
+  }
+
   if (method === 'POST' && pathname === '/api/questions/publish-all') {
     const input = await body(request);
     const sourceJobId = String(input.sourceJobId || '').trim();
@@ -441,12 +462,12 @@ async function api(request, response, url) {
   const paperMatch = pathname.match(/^\/api\/papers\/([^/]+)(?:\/(preview|confirm|export-pdf))?$/);
   if (method === 'GET' && paperMatch) {
     const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(paperMatch[1]); if (!paper) return fail(response, 404, '试卷不存在');
-    const questions = db.prepare(`SELECT pq.*, q.id AS question_id, q.type, q.difficulty, qv.content_json, qv.answer_json, qv.analysis FROM paper_questions pq JOIN question_versions qv ON qv.id = pq.question_version_id JOIN questions q ON q.id = qv.question_id WHERE pq.paper_id = ? ORDER BY pq.sort_order`).all(paper.id).map(questionView);
+    const questions = db.prepare(`SELECT pq.*, q.id AS question_id, q.type, q.difficulty, q.source_job_id, qv.content_json, qv.answer_json, qv.analysis FROM paper_questions pq JOIN question_versions qv ON qv.id = pq.question_version_id JOIN questions q ON q.id = qv.question_id WHERE pq.paper_id = ? ORDER BY pq.sort_order`).all(paper.id).map(questionView);
     return send(response, 200, { ...paper, rule: json(paper.rule_config, {}), questions });
   }
   if (method === 'POST' && paperMatch?.[2] === 'confirm') {
     const paper = db.prepare('SELECT * FROM papers WHERE id = ?').get(paperMatch[1]); if (!paper) return fail(response, 404, '试卷不存在');
-    const questions = db.prepare(`SELECT pq.*, q.type, q.difficulty, qv.content_json FROM paper_questions pq JOIN question_versions qv ON qv.id = pq.question_version_id JOIN questions q ON q.id = qv.question_id WHERE pq.paper_id = ? ORDER BY pq.sort_order`).all(paper.id).map(questionView);
+    const questions = db.prepare(`SELECT pq.*, q.type, q.difficulty, q.source_job_id, qv.content_json FROM paper_questions pq JOIN question_versions qv ON qv.id = pq.question_version_id JOIN questions q ON q.id = qv.question_id WHERE pq.paper_id = ? ORDER BY pq.sort_order`).all(paper.id).map(questionView);
     const snapshot = { paperId: paper.id, name: paper.name, totalScore: paper.total_score, questions };
     db.prepare('INSERT INTO paper_snapshots(paper_id, snapshot_json) VALUES (?, ?)').run(paper.id, JSON.stringify(snapshot)); db.prepare('UPDATE papers SET status = \'confirmed\' WHERE id = ?').run(paper.id);
     return send(response, 200, snapshot);
